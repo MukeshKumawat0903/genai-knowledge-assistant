@@ -1,0 +1,4 @@
+# .gitkeep
+
+# This file ensures the data/ directory structure is tracked by git
+# while allowing data files themselves to be gitignored

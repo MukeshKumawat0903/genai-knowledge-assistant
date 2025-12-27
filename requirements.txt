@@ -1,0 +1,58 @@
+# GenAI Knowledge Assistant – RAG & Agentic Workflows
+# Python Dependencies
+
+# Core Framework
+streamlit>=1.30.0
+python-dotenv>=1.0.0
+
+# LangChain Ecosystem (Modern 1.2.0+ with LangGraph)
+langchain==1.2.0
+langchain-community==0.4.1
+langchain-core==1.2.5
+langchainhub>=0.1.0  # Required for pulling standard prompts from hub
+langgraph>=1.0.2  # Modern agent framework with LangGraph
+# langchain-openai>=0.0.5  # UNUSED - Only in commented code
+# langchain-anthropic>=0.0.5  # UNUSED - Only in commented code
+# langchain-google-genai>=0.0.5  # UNUSED - Only in commented code
+langchain-groq==1.1.1  # Latest with full Groq + LangGraph support
+langchain-huggingface==1.2.0  # Latest HuggingFace integration
+
+# LLM Providers
+groq>=0.4.0
+
+# Vector Stores
+faiss-cpu>=1.7.4
+chromadb>=0.4.20
+
+# Embeddings
+sentence-transformers>=2.3.0  # Required for SentenceTransformer models (e.g., all-MiniLM-L6-v2)
+tiktoken>=0.5.2
+
+# PDF Processing
+pypdf>=4.0.0  # Modern PyPDF (replaces PyPDF2)
+reportlab>=4.0.0  # PDF creation (for testing)
+
+# Web Scraping
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+ddgs>=1.0.0  # Required for DuckDuckGo search tool (langchain_community dependency)
+wikipedia>=1.4.0  # Required for Wikipedia search tool
+arxiv>=2.0.0  # Required for ArXiv search tool
+
+# YouTube
+youtube-transcript-api>=0.6.1
+
+# Data Processing
+numpy>=1.24.0
+
+# Search and Retrieval
+
+# Utilities
+pydantic>=2.5.0
+
+# Logging and Monitoring
+
+# Testing (Optional)
+pytest>=7.4.0
+
+# Development (Optional)

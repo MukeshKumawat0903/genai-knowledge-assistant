@@ -1,0 +1,80 @@
+# Gitignore for GenAI Knowledge Assistant
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data directories (keep structure, ignore contents)
+data/raw/*
+!data/raw/README.md
+data/processed/*
+!data/processed/README.md
+data/vector_store/*
+
+# Logs
+logs/*.log
+logs/*.txt
+!logs/README.md
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+.pytest_cache/
+
+# Model files
+*.pkl
+*.pickle
+*.h5
+*.ckpt
+*.safetensors
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
+Thumbs.db
+.DS_Store
