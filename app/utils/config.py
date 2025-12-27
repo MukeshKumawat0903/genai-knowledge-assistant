@@ -228,9 +228,9 @@ class Settings:
             Default model name string
         """
         defaults = {
-            "groq": "llama3-8b-8192",
+            "groq": "llama-3.3-70b-versatile",
         }
-        return defaults.get(self.llm_provider, "llama3-8b-8192")
+        return defaults.get(self.llm_provider, "llama-3.3-70b-versatile")
     
     def _get_optional_int(self, key: str) -> Optional[int]:
         """
