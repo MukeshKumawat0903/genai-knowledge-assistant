@@ -509,6 +509,12 @@ def render_sidebar():
             
             st.info("ℹ️ Switching vector stores requires re-indexing documents.")
             
+            # Show indicator if settings not yet applied
+            if not st.session_state.get("settings_applied", False):
+                st.warning("⚠️ Click 'Apply Settings' below to activate your model selection.")
+            elif st.session_state.get("runtime_model_override") != st.session_state["selected_model"]:
+                st.warning("⚠️ Model changed. Click 'Apply Settings' to use the new model.")
+            
             # Apply Settings Button
             if st.button("✅ Apply Settings", use_container_width=True, type="primary"):
                 # Check if vector store type is changing
