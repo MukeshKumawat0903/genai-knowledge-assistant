@@ -1,47 +1,38 @@
 """
 RAG Evaluator - Retrieval Quality Assessment
 
-Provides manual-evaluation tools for assessing RAG retrieval quality.
+Provides two complementary evaluation strategies:
 
-Core Metrics:
-- Precision@K: Fraction of retrieved docs that are relevant
-- Recall@K: Fraction of relevant docs that were retrieved
-- F1@K: Harmonic mean of precision and recall
-- MRR: Rank position of first relevant document
-- Hit Rate@K: Whether at least one relevant doc was found
+1. RAGEvaluator — manual evaluation with known relevance labels.
+   Metrics: Precision@K, Recall@K, F1@K, Hit Rate@K, MRR.
 
-Use Cases:
-- Compare chunk sizes, top-k values, vector stores
-- Evaluate retrieval effectiveness with manual relevance judgments
-- Identify retrieval failures and optimization opportunities
-"""
-       │
-       ▼
-┌──────────────┐      ┌─────────────────┐
-│  Retriever   │─────▶│ Retrieved Docs  │
-└──────────────┘      └────────┬────────┘
-                               │
-                               ▼
-┌─────────────────┐    ┌──────────────┐
-│  Relevant Docs  │───▶│  Evaluator   │
-│  (Manual List)  │    └──────┬───────┘
-└─────────────────┘           │
-                              ▼
-                       ┌──────────────┐
-                       │   Metrics    │
-                       │ (P@K, R@K)   │
-                       └──────────────┘
+2. RAGASEvaluator — automated LLM-as-judge evaluation (no labels needed).
+   Metrics: Faithfulness, Answer Relevancy, Context Precision.
 
-Example Usage:
+Architecture::
+
+       ┌──────────────┐      ┌─────────────────┐
+       │  Retriever   │─────▶│ Retrieved Docs  │
+       └──────────────┘      └────────┬────────┘
+                                      │
+                                      ▼
+       ┌─────────────────┐    ┌──────────────┐
+       │  Relevant Docs  │───▶│  Evaluator   │
+       │  (Manual List)  │    └──────┬───────┘
+       └─────────────────┘           │
+                                     ▼
+                              ┌──────────────┐
+                              │   Metrics    │
+                              │ (P@K, R@K)   │
+                              └──────────────┘
+
+Example Usage::
+
     >>> from app.rag.evaluator import RAGEvaluator
-    >>> 
-    >>> # Define what's relevant (manual)
+    >>>
     >>> relevant_doc_ids = ["doc1", "doc3", "doc7"]
-    >>> 
-    >>> # Retrieve documents
     >>> retrieved = retriever.retrieve("What is Python?", k=5)
-    >>> 
-    >>> # Evaluate
+    >>>
     >>> evaluator = RAGEvaluator()
     >>> result = evaluator.evaluate_query(
     ...     query="What is Python?",
@@ -49,16 +40,9 @@ Example Usage:
     ...     relevant_doc_ids=relevant_doc_ids,
     ...     k=5
     ... )
-    >>> 
     >>> print(f"Precision@5: {result['precision_at_k']:.2f}")
     >>> print(f"Recall@5: {result['recall_at_k']:.2f}")
 """
-
-from typing import List, Dict, Any, Optional, Set, Union
-from dataclasses import dataclass, field
-from collections import defaultdict
-import statistics
-
 
 from typing import List, Dict, Any, Optional, Set, Union
 from dataclasses import dataclass, field
@@ -985,13 +969,191 @@ def format_evaluation_report(result: QueryEvaluationResult) -> str:
 
 
 # =============================================================================
+# RAGAS-style Automated Evaluator (LLM-as-Judge)
+# =============================================================================
+
+_FAITHFULNESS_PROMPT = """\
+You are a strict evaluator. Given a CONTEXT and an ANSWER, score how faithfully \
+the answer is supported by the context.
+
+Score 1.0 if every claim in the answer is directly supported by the context.
+Score 0.0 if the answer contains information not found in or contradicted by the context.
+Intermediate scores (0.1–0.9) for partial support.
+
+Respond with ONLY a JSON object: {{"score": <float 0-1>, "reason": "<one sentence>"}}
+
+CONTEXT:
+{context}
+
+ANSWER:
+{answer}
+"""
+
+_ANSWER_RELEVANCY_PROMPT = """\
+You are a strict evaluator. Given a QUESTION and an ANSWER, score how well the \
+answer addresses the question.
+
+Score 1.0 if the answer directly and completely answers the question.
+Score 0.0 if the answer is irrelevant or off-topic.
+Intermediate scores for partial relevance.
+
+Respond with ONLY a JSON object: {{"score": <float 0-1>, "reason": "<one sentence>"}}
+
+QUESTION:
+{question}
+
+ANSWER:
+{answer}
+"""
+
+_CONTEXT_PRECISION_PROMPT = """\
+You are a strict evaluator. Given a QUESTION and RETRIEVED CONTEXTS, score how \
+relevant the retrieved contexts are to answering the question.
+
+Score 1.0 if all contexts are directly relevant to the question.
+Score 0.0 if all contexts are irrelevant.
+Intermediate scores for mixed relevance.
+
+Respond with ONLY a JSON object: {{"score": <float 0-1>, "reason": "<one sentence>"}}
+
+QUESTION:
+{question}
+
+RETRIEVED CONTEXTS:
+{contexts}
+"""
+
+
+class RAGASEvaluator:
+    """
+    Automated RAG evaluation using LLM-as-judge (RAGAS-style metrics).
+
+    Unlike RAGEvaluator (which requires manual relevance labels), this class
+    uses an LLM to score three key dimensions:
+
+    - **Faithfulness**: Is the answer grounded in the retrieved context?
+      (Detects hallucinations — answers not supported by evidence.)
+
+    - **Answer Relevancy**: Does the answer address the user's question?
+      (Detects vague or off-topic responses.)
+
+    - **Context Precision**: Are the retrieved chunks relevant to the question?
+      (Evaluates retrieval quality without a reference answer.)
+
+    Each metric is scored 0.0–1.0.  An overall score is the mean of all three.
+
+    Example::
+
+        from app.rag.evaluator import RAGASEvaluator
+        from app.core.llm import LLMFactory
+
+        llm = LLMFactory.create()
+        evaluator = RAGASEvaluator(llm=llm)
+
+        result = evaluator.evaluate(
+            question="What is RAG?",
+            answer="RAG combines retrieval with generation to reduce hallucinations.",
+            contexts=["RAG stands for Retrieval-Augmented Generation..."],
+        )
+        print(result)
+        # {'faithfulness': 0.9, 'answer_relevancy': 1.0, 'context_precision': 0.85, 'overall': 0.92}
+    """
+
+    def __init__(self, llm: Any = None):
+        """
+        Args:
+            llm: LangChain chat model. If None, LLMFactory.create() is used.
+        """
+        self._llm = llm
+
+    def _get_llm(self) -> Any:
+        if self._llm is None:
+            from app.core.llm import LLMFactory
+            self._llm = LLMFactory.create()
+        return self._llm
+
+    def _score(self, prompt: str) -> Dict[str, Any]:
+        """Call the LLM and parse the JSON score response."""
+        import json as _json
+        import re
+
+        llm = self._get_llm()
+        try:
+            response = llm.invoke(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            # Extract JSON from the response (model may wrap it in ```json blocks)
+            match = re.search(r"\{.*?\}", text, re.DOTALL)
+            if match:
+                return _json.loads(match.group())
+        except Exception as exc:
+            return {"score": 0.0, "reason": f"Evaluation error: {exc}"}
+        return {"score": 0.0, "reason": "Could not parse LLM response."}
+
+    def evaluate_faithfulness(self, answer: str, contexts: List[str]) -> Dict[str, Any]:
+        """Score how faithfully the answer is supported by the retrieved context."""
+        context_text = "\n\n---\n\n".join(contexts) if contexts else "(none)"
+        prompt = _FAITHFULNESS_PROMPT.format(context=context_text, answer=answer)
+        result = self._score(prompt)
+        return {"metric": "faithfulness", **result}
+
+    def evaluate_answer_relevancy(self, question: str, answer: str) -> Dict[str, Any]:
+        """Score how well the answer addresses the question."""
+        prompt = _ANSWER_RELEVANCY_PROMPT.format(question=question, answer=answer)
+        result = self._score(prompt)
+        return {"metric": "answer_relevancy", **result}
+
+    def evaluate_context_precision(self, question: str, contexts: List[str]) -> Dict[str, Any]:
+        """Score whether the retrieved contexts are relevant to the question."""
+        context_text = "\n\n---\n\n".join(contexts) if contexts else "(none)"
+        prompt = _CONTEXT_PRECISION_PROMPT.format(question=question, contexts=context_text)
+        result = self._score(prompt)
+        return {"metric": "context_precision", **result}
+
+    def evaluate(
+        self,
+        question: str,
+        answer: str,
+        contexts: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Run all three RAGAS-style metrics and return an aggregate score.
+
+        Args:
+            question: The user's question.
+            answer: The assistant's generated answer.
+            contexts: List of retrieved document chunks used to generate the answer.
+
+        Returns:
+            Dict with keys: faithfulness, answer_relevancy, context_precision, overall,
+            plus per-metric reasons.
+        """
+        f_result = self.evaluate_faithfulness(answer, contexts)
+        ar_result = self.evaluate_answer_relevancy(question, answer)
+        cp_result = self.evaluate_context_precision(question, contexts)
+
+        scores = [f_result["score"], ar_result["score"], cp_result["score"]]
+        overall = round(sum(scores) / len(scores), 3)
+
+        return {
+            "faithfulness": f_result["score"],
+            "faithfulness_reason": f_result.get("reason", ""),
+            "answer_relevancy": ar_result["score"],
+            "answer_relevancy_reason": ar_result.get("reason", ""),
+            "context_precision": cp_result["score"],
+            "context_precision_reason": cp_result.get("reason", ""),
+            "overall": overall,
+        }
+
+
+# =============================================================================
 # Module Exports
 # =============================================================================
 
 __all__ = [
     "RAGEvaluator",
+    "RAGASEvaluator",
     "RetrievalMetrics",
     "QueryEvaluationResult",
     "create_relevance_mapping",
-    "format_evaluation_report"
+    "format_evaluation_report",
 ]

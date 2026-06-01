@@ -20,7 +20,7 @@ Usage:
 """
 
 import os
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, List
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -65,16 +65,37 @@ class Settings:
         # Environment variables: LLM_PROVIDER, LLM_MODEL_NAME, LLM_TEMPERATURE, etc.
         
         self.llm_provider: str = os.getenv("LLM_PROVIDER", "groq").lower()
-        """
-        LLM provider to use.
+        """LLM provider: 'groq', 'openai', 'anthropic', or 'google'."""
 
-        Note:
-            This repo is configured for Groq-only. Other providers can be added later,
-            but are not implemented end-to-end.
-        """
-        
+        # Available models per provider (config-driven, no hardcoding in UI)
+        self.available_models: Dict[str, List[str]] = {
+            "groq": [
+                "llama-3.3-70b-versatile",
+                "llama-3.1-70b-versatile",
+                "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768",
+                "gemma2-9b-it",
+            ],
+            "openai": [
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4-turbo",
+                "gpt-3.5-turbo",
+            ],
+            "anthropic": [
+                "claude-sonnet-4-6",
+                "claude-opus-4-8",
+                "claude-haiku-4-5-20251001",
+            ],
+            "google": [
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+                "gemini-pro",
+            ],
+        }
+
         self.llm_model_name: str = os.getenv(
-            "LLM_MODEL_NAME", 
+            "LLM_MODEL_NAME",
             self._get_default_model_name()
         )
         """
@@ -97,9 +118,17 @@ class Settings:
         # ========================================================================
         # API Keys
         # ========================================================================
-        # Environment variables: GROQ_API_KEY
         self.groq_api_key: Optional[str] = os.getenv("GROQ_API_KEY")
         """Groq API key for fast inference"""
+
+        self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+        """OpenAI API key for GPT-4o and related models"""
+
+        self.anthropic_api_key: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
+        """Anthropic API key for Claude models"""
+
+        self.google_api_key: Optional[str] = os.getenv("GOOGLE_API_KEY")
+        """Google API key for Gemini models"""
         
         # ========================================================================
         # Embedding Configuration
@@ -221,14 +250,12 @@ class Settings:
         self._validate()
     
     def _get_default_model_name(self) -> str:
-        """
-        Get default model name based on selected LLM provider.
-        
-        Returns:
-            Default model name string
-        """
+        """Get default model name for the configured LLM provider."""
         defaults = {
             "groq": "llama-3.3-70b-versatile",
+            "openai": "gpt-4o-mini",
+            "anthropic": "claude-sonnet-4-6",
+            "google": "gemini-1.5-flash",
         }
         return defaults.get(self.llm_provider, "llama-3.3-70b-versatile")
     
@@ -246,72 +273,70 @@ class Settings:
         return int(value) if value else None
     
     def _validate(self) -> None:
-        """
-        Validate configuration values.
-        
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        # Validate LLM provider
-        valid_llm_providers = ["groq"]
+        """Validate configuration values."""
+        # Provider
+        valid_llm_providers = ["groq", "openai", "anthropic", "google"]
         if self.llm_provider not in valid_llm_providers:
             raise ValueError(
                 f"Invalid LLM provider: '{self.llm_provider}'. "
                 f"Must be one of: {', '.join(valid_llm_providers)}"
             )
-        
-        # Validate vector store type
+
+        # Require the API key only for the configured provider
+        _provider_key_map = {
+            "groq": self.groq_api_key,
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "google": self.google_api_key,
+        }
+        _env_var_map = {
+            "groq": "GROQ_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "google": "GOOGLE_API_KEY",
+        }
+        if not _provider_key_map[self.llm_provider]:
+            raise ValueError(
+                f"Missing API key for '{self.llm_provider}'. "
+                f"Please set {_env_var_map[self.llm_provider]} in your .env file."
+            )
+
+        # Vector store
         valid_vector_stores = ["faiss", "chroma", "pinecone"]
         if self.vector_store_type not in valid_vector_stores:
             raise ValueError(
                 f"Invalid vector store type: '{self.vector_store_type}'. "
                 f"Must be one of: {', '.join(valid_vector_stores)}"
             )
-        
-        # Validate Groq API key
-        if not self.groq_api_key:
-            raise ValueError(
-                "Missing API key for groq. Please set GROQ_API_KEY in your .env file."
-            )
-        
-        # Validate numeric ranges
+
+        # Numeric ranges
         if not 0.0 <= self.llm_temperature <= 2.0:
             raise ValueError(
                 f"LLM temperature must be between 0.0 and 2.0, got {self.llm_temperature}"
             )
-        
+
         if self.chunk_size < 100:
-            raise ValueError(
-                f"Chunk size must be at least 100, got {self.chunk_size}"
-            )
-        
+            raise ValueError(f"Chunk size must be at least 100, got {self.chunk_size}")
+
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError(
                 f"Chunk overlap ({self.chunk_overlap}) must be less than "
                 f"chunk size ({self.chunk_size})"
             )
-        
+
         if self.retriever_top_k < 1:
-            raise ValueError(
-                f"Retriever top_k must be at least 1, got {self.retriever_top_k}"
-            )
+            raise ValueError(f"Retriever top_k must be at least 1, got {self.retriever_top_k}")
     
     def get_api_key(self, provider: Optional[str] = None) -> Optional[str]:
-        """
-        Get API key for specified provider (or current provider if not specified).
-        
-        Args:
-            provider: Provider name (defaults to current llm_provider)
-            
-        Returns:
-            API key string or None
-        """
-        # Kept for backwards compatibility with existing code/tests.
-        # This repo is Groq-only, so the only supported key is GROQ_API_KEY.
+        """Get API key for the specified provider (defaults to current provider)."""
         provider = (provider or self.llm_provider).lower()
-        if provider != "groq":
-            return None
-        return self.groq_api_key
+        key_map = {
+            "groq": self.groq_api_key,
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "google": self.google_api_key,
+        }
+        return key_map.get(provider)
     
     def __repr__(self) -> str:
         """String representation of settings (without exposing API keys)."""

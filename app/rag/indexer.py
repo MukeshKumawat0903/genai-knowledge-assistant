@@ -71,12 +71,26 @@ Architecture:
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from langchain_core.documents import Document
+import json
+from datetime import datetime
 
 # Import our core components
 from app.core.text_splitter import TextChunker
 from app.core.embeddings import EmbeddingManager
 from app.core.vector_store import VectorStoreManager
 from app.utils.config import get_settings
+
+
+def _infer_source_type(source: str) -> str:
+    """Guess a human-readable type label from a source string."""
+    s = source.lower()
+    if s.endswith(".pdf"):
+        return "pdf"
+    if "youtube.com" in s or "youtu.be" in s:
+        return "youtube"
+    if s.startswith("http://") or s.startswith("https://"):
+        return "web"
+    return "file"
 
 
 class DocumentIndexer:
@@ -244,7 +258,10 @@ class DocumentIndexer:
             self.vector_store_manager.save_vector_store(vector_store)
             print(f"✓ Vector store saved")
             
-            # Step 5: Return success metadata
+            # Step 5: Update document registry
+            self._update_registry(documents, len(chunks))
+
+            # Step 6: Return success metadata
             return {
                 'success': True,
                 'num_documents': len(documents),
@@ -263,6 +280,121 @@ class DocumentIndexer:
                 'message': f'Indexing failed: {str(e)}'
             }
     
+    # ------------------------------------------------------------------
+    # Document Registry (metadata tracking for the management panel)
+    # ------------------------------------------------------------------
+
+    def _get_registry_path(self) -> Path:
+        """Return the path to the JSON document registry file."""
+        vs_path = self.vector_store_manager.settings.vector_store_path
+        return Path(vs_path) / "document_registry.json"
+
+    def _load_registry(self) -> List[Dict[str, Any]]:
+        """Load the document registry from disk (empty list if not found)."""
+        path = self._get_registry_path()
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        return []
+
+    def _save_registry(self, registry: List[Dict[str, Any]]) -> None:
+        """Persist the document registry to disk."""
+        path = self._get_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _update_registry(self, documents: List[Document], num_chunks: int) -> None:
+        """Add newly indexed documents to the registry."""
+        registry = self._load_registry()
+
+        # Group documents by their source metadata field
+        sources: Dict[str, Dict[str, Any]] = {}
+        for doc in documents:
+            source = doc.metadata.get("source", "unknown")
+            if source not in sources:
+                sources[source] = {
+                    "source": source,
+                    "source_type": doc.metadata.get("source_type", _infer_source_type(source)),
+                    "num_pages": 0,
+                    "num_chunks": 0,
+                    "indexed_at": datetime.now().isoformat(),
+                }
+            sources[source]["num_pages"] += 1
+
+        # Distribute chunks proportionally (simple estimate)
+        if sources:
+            per_source = max(1, num_chunks // len(sources))
+            for entry in sources.values():
+                entry["num_chunks"] = per_source
+
+        # Merge: replace existing entry for same source, append new ones
+        existing = {e["source"]: i for i, e in enumerate(registry)}
+        for entry in sources.values():
+            if entry["source"] in existing:
+                registry[existing[entry["source"]]] = entry
+            else:
+                registry.append(entry)
+
+        self._save_registry(registry)
+
+    def list_documents(self) -> List[Dict[str, Any]]:
+        """
+        Return metadata for all indexed documents.
+
+        Returns:
+            List of dicts with keys: source, source_type, num_chunks, indexed_at
+        """
+        return self._load_registry()
+
+    def delete_document(self, source: str) -> Dict[str, Any]:
+        """
+        Remove a document entry from the registry.
+
+        For Chroma vector stores, also deletes the corresponding vectors.
+        For FAISS, the vectors remain until the next full re-index (soft delete).
+
+        Args:
+            source: The 'source' metadata value identifying the document.
+
+        Returns:
+            Dict with 'success' bool and 'message' string.
+        """
+        registry = self._load_registry()
+        original_len = len(registry)
+        registry = [e for e in registry if e.get("source") != source]
+
+        if len(registry) == original_len:
+            return {"success": False, "message": f"Document '{source}' not found in registry."}
+
+        self._save_registry(registry)
+
+        # Attempt hard delete from Chroma (FAISS does not support per-document deletion)
+        vs_type = getattr(self.vector_store_manager, "vector_store_type", "")
+        chroma_deleted = False
+        if vs_type == "chroma":
+            try:
+                vs = self.vector_store_manager.load_vector_store()
+                collection = vs._collection  # Chroma internal
+                collection.delete(where={"source": source})
+                chroma_deleted = True
+            except Exception as exc:
+                return {
+                    "success": True,
+                    "message": (
+                        f"Removed '{source}' from registry. "
+                        f"Chroma vector deletion failed: {exc} — re-index to fully remove."
+                    ),
+                }
+
+        msg = f"Removed '{source}' from registry."
+        if vs_type == "faiss":
+            msg += " FAISS index unchanged — re-index remaining documents to rebuild."
+        elif chroma_deleted:
+            msg += " Chroma vectors deleted."
+        return {"success": True, "message": msg}
+
     def _validate_documents(self, documents: List[Document]) -> Dict[str, Any]:
         """
         Validate input documents before indexing.

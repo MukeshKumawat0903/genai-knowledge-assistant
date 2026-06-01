@@ -19,6 +19,10 @@ langchain-huggingface==1.2.0  # Latest HuggingFace integration
 
 # LLM Providers
 groq>=0.4.0
+# Optional providers — install whichever you need:
+langchain-openai>=0.3.0          # pip install langchain-openai
+langchain-anthropic>=0.3.0       # pip install langchain-anthropic
+langchain-google-genai>=2.0.0    # pip install langchain-google-genai
 
 # Vector Stores
 faiss-cpu>=1.7.4

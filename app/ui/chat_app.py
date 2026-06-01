@@ -179,28 +179,23 @@ def call_rag_chain(query: str, chat_history: List[Dict[str, str]]) -> Dict[str, 
         from app.core.vector_store import VectorStoreManager
         from app.core.embeddings import EmbeddingManager
         from app.utils.config import get_settings
-        from langchain_groq import ChatGroq
-        
+        from app.core.llm import LLMFactory
+
         settings = get_settings()
-        
+
         # Check for runtime overrides from UI controls
         runtime_model = st.session_state.get("runtime_model_override")
         runtime_temperature = st.session_state.get("runtime_temperature_override")
-        
-        # Create custom LLM with runtime overrides if applied
+        runtime_provider = st.session_state.get("runtime_provider_override", settings.llm_provider)
+
+        # Create LLM with runtime overrides when the user has applied settings
         llm = None
         if runtime_model is not None and runtime_temperature is not None:
-            # User has applied custom settings from UI - create Groq LLM
-            if not settings.groq_api_key:
-                raise ValueError(
-                    "Groq API key not found. Please set GROQ_API_KEY in your .env file.\n"
-                    "Get your free API key at: https://console.groq.com/keys"
-                )
-            llm = ChatGroq(
+            llm = LLMFactory.create_from(
+                provider=runtime_provider,
                 model=runtime_model,
                 temperature=runtime_temperature,
                 max_tokens=settings.llm_max_tokens,
-                groq_api_key=settings.groq_api_key
             )
         # If no overrides, LLM will be auto-created by create_rag_chain() with .env defaults
         
@@ -312,28 +307,23 @@ def call_knowledge_agent(query: str) -> Dict[str, Any]:
     try:
         from app.agents.agent_router import create_knowledge_agent
         from app.utils.config import get_settings
-        from langchain_groq import ChatGroq
-        
+        from app.core.llm import LLMFactory
+
         settings = get_settings()
-        
+
         # Check for runtime overrides from UI controls
         runtime_model = st.session_state.get("runtime_model_override")
         runtime_temperature = st.session_state.get("runtime_temperature_override")
-        
-        # Create custom LLM with runtime overrides if applied
+        runtime_provider = st.session_state.get("runtime_provider_override", settings.llm_provider)
+
+        # Create LLM with runtime overrides when the user has applied settings
         llm = None
         if runtime_model is not None and runtime_temperature is not None:
-            # User has applied custom settings from UI - create Groq LLM
-            if not settings.groq_api_key:
-                raise ValueError(
-                    "Groq API key not found. Please set GROQ_API_KEY in your .env file.\n"
-                    "Get your free API key at: https://console.groq.com/keys"
-                )
-            llm = ChatGroq(
+            llm = LLMFactory.create_from(
+                provider=runtime_provider,
                 model=runtime_model,
                 temperature=runtime_temperature,
                 max_tokens=settings.llm_max_tokens,
-                groq_api_key=settings.groq_api_key
             )
         # If no overrides, agent will be created with .env defaults
         
@@ -451,115 +441,106 @@ def render_sidebar():
         
         # Runtime Model Controls - Collapsed by default for cleaner UI
         with st.expander("🎛️ Model Controls", expanded=False):
-            # Initialize defaults from settings if not already set
             from app.utils.config import get_settings
             settings = get_settings()
-            
+
+            # ---- initialize session state defaults ----
+            if "selected_provider" not in st.session_state:
+                st.session_state["selected_provider"] = settings.llm_provider
             if "selected_model" not in st.session_state:
                 st.session_state["selected_model"] = settings.llm_model_name
-            
             if "temperature" not in st.session_state:
                 st.session_state["temperature"] = settings.llm_temperature
-            
             if "vector_store_type" not in st.session_state:
                 st.session_state["vector_store_type"] = settings.vector_store_type
-            
-            # LLM Model Selection
-            model_options = [
-                "llama-3.3-70b-versatile",
-                "llama-3.1-70b-versatile",
-                "llama-3.1-8b-instant"
-            ]
-            
+
+            # ---- Provider Selection ----
+            provider_options = list(settings.available_models.keys())
+            current_provider = st.session_state["selected_provider"]
+            provider_index = provider_options.index(current_provider) if current_provider in provider_options else 0
+
+            selected_provider = st.selectbox(
+                "LLM Provider",
+                options=provider_options,
+                index=provider_index,
+                format_func=lambda p: {
+                    "groq": "Groq (free, fast)",
+                    "openai": "OpenAI (GPT-4o)",
+                    "anthropic": "Anthropic (Claude)",
+                    "google": "Google (Gemini)",
+                }.get(p, p.title()),
+                help="Choose the AI provider. Each requires its own API key in .env.",
+            )
+            # Reset model selection when provider changes
+            if selected_provider != st.session_state["selected_provider"]:
+                st.session_state["selected_provider"] = selected_provider
+                st.session_state["selected_model"] = settings.available_models[selected_provider][0]
+
+            # ---- Model Selection (dynamic per provider) ----
+            model_options = settings.available_models.get(selected_provider, [settings.llm_model_name])
             current_model = st.session_state["selected_model"]
-            default_index = 0
-            if current_model in model_options:
-                default_index = model_options.index(current_model)
-            
+            model_index = model_options.index(current_model) if current_model in model_options else 0
+
             st.session_state["selected_model"] = st.selectbox(
                 "LLM Model",
                 options=model_options,
-                index=default_index,
-                help="Choose the language model for generating responses"
+                index=model_index,
+                help="Models available for the selected provider.",
             )
-            
-            # Temperature Slider
+
+            # ---- Temperature ----
             st.session_state["temperature"] = st.slider(
                 "Temperature",
                 min_value=0.0,
                 max_value=1.0,
                 value=st.session_state["temperature"],
                 step=0.05,
-                help="Lower temperature (0.0-0.3) = more factual and focused responses. Higher temperature (0.7-1.0) = more creative and diverse outputs."
+                help="0.0–0.3 = factual/focused. 0.7–1.0 = creative/diverse.",
             )
-            
-            # Vector Store Selection
+
+            # ---- Vector Store ----
             vector_store_options = ["faiss", "chroma"]
             current_vector_store = st.session_state["vector_store_type"]
-            default_vs_index = 0
-            if current_vector_store in vector_store_options:
-                default_vs_index = vector_store_options.index(current_vector_store)
-            
+            vs_index = vector_store_options.index(current_vector_store) if current_vector_store in vector_store_options else 0
+
             st.session_state["vector_store_type"] = st.selectbox(
                 "Vector Store",
                 options=vector_store_options,
-                index=default_vs_index,
-                help="Choose the vector database for storing document embeddings"
+                index=vs_index,
+                help="Choose the vector database. Switching requires re-indexing.",
             )
-            
             st.info("ℹ️ Switching vector stores requires re-indexing documents.")
-            
-            # Show indicator if settings not yet applied
+
+            # ---- Status indicators ----
             if not st.session_state.get("settings_applied", False):
-                st.warning("⚠️ Click 'Apply Settings' below to activate your model selection.")
+                st.warning("⚠️ Click 'Apply Settings' to activate your selection.")
             elif st.session_state.get("runtime_model_override") != st.session_state["selected_model"]:
-                st.warning("⚠️ Model changed. Click 'Apply Settings' to use the new model.")
-            
-            # Apply Settings Button
+                st.warning("⚠️ Model changed. Click 'Apply Settings' to use it.")
+
+            # ---- Apply Settings Button ----
             if st.button("✅ Apply Settings", use_container_width=True, type="primary"):
-                # Check if vector store type is changing
-                vector_store_changed = False
-                if "runtime_vector_store_override" in st.session_state:
-                    if st.session_state["runtime_vector_store_override"] != st.session_state["vector_store_type"]:
-                        vector_store_changed = True
-                else:
-                    # First time applying settings
-                    if settings.vector_store_type != st.session_state["vector_store_type"]:
-                        vector_store_changed = True
-                
-                # Store the runtime overrides in session state
-                # These will be used by backend functions instead of .env defaults
+                vector_store_changed = (
+                    st.session_state.get("runtime_vector_store_override", settings.vector_store_type)
+                    != st.session_state["vector_store_type"]
+                )
+
+                st.session_state["runtime_provider_override"] = st.session_state["selected_provider"]
                 st.session_state["runtime_model_override"] = st.session_state["selected_model"]
                 st.session_state["runtime_temperature_override"] = st.session_state["temperature"]
                 st.session_state["runtime_vector_store_override"] = st.session_state["vector_store_type"]
-                
-                # Clear cached backend objects to force reinitialization
-                # Note: Backend functions (call_rag_chain, call_knowledge_agent) 
-                # currently create fresh instances on each call, but this ensures
-                # any future caching implementations will be invalidated.
-                if "cached_llm" in st.session_state:
-                    del st.session_state["cached_llm"]
-                if "cached_vector_store" in st.session_state:
-                    del st.session_state["cached_vector_store"]
-                if "cached_retriever" in st.session_state:
-                    del st.session_state["cached_retriever"]
-                
-                # Set flag to indicate settings have been applied
+
+                for key in ("cached_llm", "cached_vector_store", "cached_retriever"):
+                    st.session_state.pop(key, None)
+
                 st.session_state["settings_applied"] = True
-                
-                # Show success message
-                st.success("✅ Settings applied. New responses will use updated configuration.")
-                
-                # Show warning if vector store changed
+                st.success(
+                    f"✅ Applied: {st.session_state['selected_provider'].title()} / "
+                    f"{st.session_state['selected_model']}"
+                )
                 if vector_store_changed:
                     st.warning(
-                        "⚠️ Vector store type changed. You must re-index your documents "
-                        "using the 'Load + Index' button below for RAG queries to work with the new store."
+                        "⚠️ Vector store changed. Re-index your documents with 'Load + Index'."
                     )
-                
-                # Note: We do NOT reinitialize LLM/retriever here (lazy initialization)
-                # They will be created with new settings on the next query
-                # This avoids unnecessary API calls and keeps the UI responsive
         
         st.divider()
 
@@ -863,7 +844,145 @@ def render_sidebar():
         
         st.divider()
         
-        # TODO: Future controls
+        # ====================================================================
+        # Document Management Panel
+        # ====================================================================
+        with st.expander("📂 Document Management", expanded=False):
+            st.caption("Documents currently in the knowledge base index.")
+            try:
+                from app.rag.indexer import create_indexer
+                from app.utils.config import get_settings as _gs
+
+                _settings = _gs()
+                _runtime_vs = st.session_state.get("runtime_vector_store_override")
+                _active_vs = _runtime_vs or _settings.vector_store_type
+                # Apply type-specific subdirectory (same pattern as call_rag_chain)
+                _settings.vector_store_path = (
+                    _settings.vector_store_path
+                    if str(_settings.vector_store_path).endswith(_active_vs)
+                    else _settings.vector_store_path / _active_vs
+                )
+
+                _mgr_indexer = create_indexer(vector_store_type=_active_vs)
+                _docs = _mgr_indexer.list_documents()
+
+                if not _docs:
+                    st.info("No documents indexed yet. Use 'Index Content' above to add some.")
+                else:
+                    st.caption(f"{len(_docs)} document(s) indexed in {_active_vs.upper()}:")
+                    for _doc in _docs:
+                        _col1, _col2 = st.columns([4, 1])
+                        with _col1:
+                            _type_icon = {"pdf": "📄", "web": "🌐", "youtube": "▶️"}.get(
+                                _doc.get("source_type", ""), "📁"
+                            )
+                            _src = _doc.get("source", "Unknown")
+                            _chunks = _doc.get("num_chunks", "?")
+                            _ts = _doc.get("indexed_at", "")[:10]
+                            _has_sep = ("/" in _src) or ("\\" in _src)
+                            _display = _src[-40:] if _has_sep else Path(_src).name
+                            st.markdown(
+                                f"{_type_icon} **{_display}**  \n"
+                                f"<small>{_chunks} chunks · {_ts}</small>",
+                                unsafe_allow_html=True,
+                            )
+                        with _col2:
+                            if st.button("🗑️", key=f"del_{_src}", help=f"Remove {_src}"):
+                                _del_result = _mgr_indexer.delete_document(_src)
+                                if _del_result["success"]:
+                                    st.success(_del_result["message"])
+                                else:
+                                    st.error(_del_result["message"])
+                                st.rerun()
+
+                    if st.button("🗑️ Clear Entire Index", use_container_width=True):
+                        for _d in list(_docs):
+                            _mgr_indexer.delete_document(_d["source"])
+                        st.success("Index cleared.")
+                        st.rerun()
+
+            except Exception as _e:
+                st.warning(f"Could not load document registry: {_e}")
+
+        # ====================================================================
+        # RAGAS Automated Evaluation
+        # ====================================================================
+        with st.expander("🧪 RAGAS Evaluation", expanded=False):
+            st.caption(
+                "LLM-as-judge evaluation of RAG quality. "
+                "Scores the last assistant response on faithfulness, "
+                "answer relevancy, and context precision."
+            )
+
+            _last_q = ""
+            _last_a = ""
+            _last_ctx: List[str] = []
+
+            # Pre-fill from last exchange in history
+            _history = get_chat_history()
+            for _i in range(len(_history) - 1, -1, -1):
+                if _history[_i]["role"] == "assistant":
+                    _last_a = _history[_i].get("content", "")
+                    _raw_sources = _history[_i].get("sources", [])
+                    _last_ctx = [s.get("content", "") for s in _raw_sources if s.get("content")]
+                    # find the preceding user message
+                    if _i > 0 and _history[_i - 1]["role"] == "user":
+                        _last_q = _history[_i - 1].get("content", "")
+                    break
+
+            _eval_question = st.text_input(
+                "Question",
+                value=_last_q,
+                help="The user question to evaluate against.",
+                key="ragas_question",
+            )
+            _eval_answer = st.text_area(
+                "Answer (assistant response)",
+                value=_last_a,
+                height=80,
+                help="The answer to evaluate for faithfulness and relevancy.",
+                key="ragas_answer",
+            )
+            _eval_context = st.text_area(
+                "Context (retrieved chunks, one per line)",
+                value="\n\n---\n\n".join(_last_ctx) if _last_ctx else "",
+                height=100,
+                help="The retrieved document chunks used to generate the answer.",
+                key="ragas_context",
+            )
+
+            if st.button("▶️ Run RAGAS Evaluation", use_container_width=True):
+                if not _eval_question.strip() or not _eval_answer.strip():
+                    st.warning("Please provide at least a question and an answer.")
+                else:
+                    _contexts = [
+                        c.strip()
+                        for c in _eval_context.split("---")
+                        if c.strip()
+                    ] if _eval_context.strip() else []
+
+                    with st.spinner("Evaluating with LLM-as-judge…"):
+                        try:
+                            from app.rag.evaluator import RAGASEvaluator
+                            _ragas = RAGASEvaluator()
+                            _result = _ragas.evaluate(
+                                question=_eval_question,
+                                answer=_eval_answer,
+                                contexts=_contexts,
+                            )
+                            st.markdown("**Evaluation Results**")
+                            _r1, _r2, _r3 = st.columns(3)
+                            _r1.metric("Faithfulness", f"{_result['faithfulness']:.2f}")
+                            _r2.metric("Answer Relevancy", f"{_result['answer_relevancy']:.2f}")
+                            _r3.metric("Context Precision", f"{_result['context_precision']:.2f}")
+                            st.metric("Overall Score", f"{_result['overall']:.2f}")
+                            with st.expander("Reasoning"):
+                                st.write(f"**Faithfulness:** {_result.get('faithfulness_reason', '')}")
+                                st.write(f"**Answer Relevancy:** {_result.get('answer_relevancy_reason', '')}")
+                                st.write(f"**Context Precision:** {_result.get('context_precision_reason', '')}")
+                        except Exception as _eval_err:
+                            st.error(f"Evaluation failed: {_eval_err}")
+
         with st.expander("🚀 Coming Soon"):
             st.markdown("""
             - 🔄 Import Chat History

@@ -312,20 +312,140 @@ class ConversationMemoryManager:
 
 # Convenience factory function
 def create_memory_manager(max_sessions: int = 1000) -> ConversationMemoryManager:
-    """
-    Factory function to create a ConversationMemoryManager instance.
-    
-    Args:
-        max_sessions: Maximum number of concurrent sessions
-    
-    Returns:
-        Configured ConversationMemoryManager instance
-    
-    Example:
-        >>> memory_mgr = create_memory_manager(max_sessions=500)
-        >>> memory_mgr.add_user_message("user123", "Hello!")
-    """
+    """Factory function to create an in-memory ConversationMemoryManager."""
     return ConversationMemoryManager(max_sessions=max_sessions)
+
+
+# =============================================================================
+# SQLite Persistent Memory Manager
+# =============================================================================
+
+class SQLiteMemoryManager:
+    """
+    Persistent conversation memory backed by SQLite.
+
+    Chat history survives page reloads and app restarts.  Messages are stored in
+    a local SQLite database file (default: data/chat_history.db).
+
+    The schema is intentionally minimal — one row per message:
+        session_id | role | content | timestamp
+
+    Example:
+        mgr = SQLiteMemoryManager()
+        mgr.add_user_message("sess_abc", "What is RAG?")
+        mgr.add_ai_message("sess_abc", "RAG stands for Retrieval-Augmented Generation.")
+        history = mgr.get_chat_history("sess_abc")
+    """
+
+    def __init__(self, db_path: str = "./data/chat_history.db"):
+        import sqlite3
+        from pathlib import Path
+
+        self.db_path = str(Path(db_path))
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self):
+        import sqlite3
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _init_db(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role      TEXT NOT NULL,
+                    content   TEXT NOT NULL,
+                    timestamp TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session ON messages(session_id)"
+            )
+            conn.commit()
+
+    def add_user_message(self, session_id: str, content: str) -> None:
+        """Persist a user message."""
+        from datetime import datetime
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, "human", content, datetime.now().isoformat()),
+            )
+            conn.commit()
+
+    def add_ai_message(self, session_id: str, content: str) -> None:
+        """Persist an AI message."""
+        from datetime import datetime
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, "ai", content, datetime.now().isoformat()),
+            )
+            conn.commit()
+
+    def get_chat_history(
+        self, session_id: str, as_messages: bool = False
+    ) -> "List[Tuple[str, str]] | List[BaseMessage]":
+        """
+        Retrieve persisted chat history for a session.
+
+        Args:
+            session_id: Session identifier
+            as_messages: If True return LangChain BaseMessage objects;
+                         if False return [(human, ai), ...] tuples.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+
+        if as_messages:
+            msgs = []
+            for role, content in rows:
+                if role == "human":
+                    msgs.append(HumanMessage(content=content))
+                else:
+                    msgs.append(AIMessage(content=content))
+            return msgs
+
+        # Return (human, ai) tuple pairs
+        history = []
+        for i in range(0, len(rows) - 1, 2):
+            if rows[i][0] == "human" and i + 1 < len(rows) and rows[i + 1][0] == "ai":
+                history.append((rows[i][1], rows[i + 1][1]))
+        return history
+
+    def clear_session(self, session_id: str) -> None:
+        """Delete all messages for a session."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            conn.commit()
+
+    def list_sessions(self) -> "List[str]":
+        """Return all session IDs that have stored messages."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT session_id FROM messages ORDER BY session_id"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def session_message_count(self, session_id: str) -> int:
+        """Return total number of messages stored for a session."""
+        with self._connect() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+        return count
+
+
+def create_persistent_memory_manager(db_path: str = "./data/chat_history.db") -> SQLiteMemoryManager:
+    """Factory function to create a SQLiteMemoryManager."""
+    return SQLiteMemoryManager(db_path=db_path)
 #    - Example:
 #      persistent_mgr = PersistentMemoryManager(backend="redis", url="redis://localhost")
 #

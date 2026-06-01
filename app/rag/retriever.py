@@ -70,6 +70,71 @@ from app.core.embeddings import EmbeddingManager
 from app.core.vector_store import VectorStoreManager
 
 
+# =============================================================================
+# Cross-Encoder Reranker
+# =============================================================================
+
+class CrossEncoderReranker:
+    """
+    Re-scores retrieved documents using a cross-encoder model.
+
+    A cross-encoder jointly encodes the query and each document, giving a much
+    more accurate relevance score than the bi-encoder similarity used during
+    retrieval.  The typical usage is:
+
+        1. Vector search retrieves top-20 candidates (high recall, lower precision)
+        2. Cross-encoder re-ranks to top-5 (high precision)
+
+    Model: cross-encoder/ms-marco-MiniLM-L-6-v2 (default, ~85 MB, CPU-friendly)
+
+    Example:
+        reranker = CrossEncoderReranker(top_n=5)
+        docs = reranker.rerank("What is RAG?", candidate_docs)
+    """
+
+    def __init__(
+        self,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        top_n: int = 4,
+    ):
+        self.model_name = model_name
+        self.top_n = top_n
+        self._model = None  # lazy load
+
+    def _load_model(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import CrossEncoder
+                self._model = CrossEncoder(self.model_name)
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers is required for reranking. "
+                    "Run: pip install sentence-transformers"
+                )
+
+    def rerank(self, query: str, documents: List[Document]) -> List[Document]:
+        """
+        Re-rank documents by cross-encoder relevance score.
+
+        Args:
+            query: User query string
+            documents: Candidate documents from vector retrieval
+
+        Returns:
+            Top-n documents sorted by cross-encoder score (most relevant first)
+        """
+        if not documents:
+            return documents
+
+        self._load_model()
+
+        pairs = [(query, doc.page_content) for doc in documents]
+        scores = self._model.predict(pairs)
+
+        scored = sorted(zip(scores, documents), key=lambda x: x[0], reverse=True)
+        return [doc for _, doc in scored[: self.top_n]]
+
+
 class RAGRetriever:
     """
     Retriever for fetching relevant context documents from a vector store.
@@ -128,38 +193,37 @@ class RAGRetriever:
         self,
         vector_store: VectorStore,
         settings: Settings,
-        search_type: str = "similarity"
+        search_type: str = "similarity",
+        reranker: Optional["CrossEncoderReranker"] = None,
     ):
         """
         Initialize the RAG retriever.
-        
+
         Args:
             vector_store: LangChain-compatible vector store instance
             settings: Settings object with retrieval configuration
-            search_type: Search strategy to use
-                - "similarity": Standard similarity search
-                - "mmr": Maximum Marginal Relevance (diverse results)
-                - "similarity_score_threshold": Filter by similarity score
-                
+            search_type: "similarity" | "mmr" | "similarity_score_threshold"
+            reranker: Optional CrossEncoderReranker applied after vector retrieval.
+                      When set, retrieves 3× top_k candidates then reranks to top_k.
+
         Raises:
             ValueError: If vector_store is None or invalid
         """
-        # Validate inputs
         if vector_store is None:
             raise ValueError("vector_store cannot be None")
-        
+
         if not hasattr(vector_store, 'as_retriever'):
             raise ValueError(
                 "vector_store must be a LangChain-compatible VectorStore "
                 "with as_retriever() method"
             )
-        
+
         self.vector_store = vector_store
         self.settings = settings
         self.top_k = settings.retriever_top_k
         self.search_type = search_type
-        
-        # Create the retriever with configuration
+        self.reranker = reranker
+
         self.retriever = self._create_retriever()
     
     def _create_retriever(self):
@@ -273,21 +337,21 @@ class RAGRetriever:
         if chat_history:
             query = self._rewrite_query_with_history(query, chat_history)
         
-        # Override k if provided
-        if k is not None:
-            # Temporarily update retriever's search_kwargs
-            original_k = self.retriever.search_kwargs.get("k", self.top_k)
-            self.retriever.search_kwargs["k"] = k
-            
-            try:
-                documents = self._run_retrieval(query, **kwargs)
-            finally:
-                # Restore original k
-                self.retriever.search_kwargs["k"] = original_k
-        else:
-            # Use default k
+        # When reranking, over-fetch candidates then rerank down to k
+        effective_k = k if k is not None else self.top_k
+        fetch_k = effective_k * 3 if self.reranker else effective_k
+
+        original_k = self.retriever.search_kwargs.get("k", self.top_k)
+        self.retriever.search_kwargs["k"] = fetch_k
+        try:
             documents = self._run_retrieval(query, **kwargs)
-        
+        finally:
+            self.retriever.search_kwargs["k"] = original_k
+
+        if self.reranker:
+            self.reranker.top_n = effective_k
+            documents = self.reranker.rerank(query, documents)
+
         return documents
 
     def _run_retrieval(self, query: str, **kwargs) -> List[Document]:
@@ -487,6 +551,66 @@ def create_retriever(
     
     # Create and return retriever
     return RAGRetriever(vector_store, settings, search_type=search_type)
+
+
+# ============================================================================
+# Multi-Query Retriever
+# ============================================================================
+
+class MultiQueryRAGRetriever:
+    """
+    Improves recall by generating multiple query paraphrases and merging results.
+
+    For a user query like "What are the benefits of RAG?", the LLM generates 3-5
+    rephrased variants (e.g., "advantages of retrieval augmented generation",
+    "why use RAG over fine-tuning?"), retrieves documents for each, then
+    deduplicates.  This catches relevant chunks that use different vocabulary
+    than the original query.
+
+    Under the hood this wraps LangChain's MultiQueryRetriever.
+
+    Example:
+        retriever = MultiQueryRAGRetriever(base_retriever, llm)
+        docs = retriever.retrieve("Explain embeddings")
+    """
+
+    def __init__(self, base_retriever: "RAGRetriever", llm: Any, num_queries: int = 3):
+        """
+        Args:
+            base_retriever: An initialized RAGRetriever.
+            llm: LangChain chat model used to generate query paraphrases.
+            num_queries: Number of additional query variants to generate.
+        """
+        self.base_retriever = base_retriever
+        self.llm = llm
+        self.num_queries = num_queries
+        self._mq_retriever = None
+
+    def _build(self):
+        if self._mq_retriever is None:
+            try:
+                from langchain.retrievers.multi_query import MultiQueryRetriever
+            except ImportError:
+                from langchain_community.retrievers import MultiQueryRetriever
+            self._mq_retriever = MultiQueryRetriever.from_llm(
+                retriever=self.base_retriever.get_retriever(),
+                llm=self.llm,
+                include_original=True,
+            )
+
+    def retrieve(self, query: str) -> List[Document]:
+        """Retrieve documents using multi-query expansion then deduplication."""
+        self._build()
+        docs = self._mq_retriever.invoke(query)
+        # Deduplicate by page_content hash
+        seen: set = set()
+        unique_docs = []
+        for doc in docs:
+            key = hash(doc.page_content)
+            if key not in seen:
+                seen.add(key)
+                unique_docs.append(doc)
+        return unique_docs
 
 
 # ============================================================================
