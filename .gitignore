@@ -74,6 +74,8 @@ logs/*.txt
 *.db
 *.sqlite
 *.sqlite3
+*.bin
+*.faiss
 
 # OS files
 Thumbs.db
